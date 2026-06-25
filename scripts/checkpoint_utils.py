@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,6 +27,122 @@ logger = logging.getLogger(__name__)
 
 BEST_META_FILE = "best_meta.json"
 HUB_RESUME_PREFIX = "resume"
+HUB_BEST_PUSH_META_FILE = "hub_best_push.json"
+
+
+def is_best_model_complete(best_dir: Path) -> bool:
+    model_file = best_dir / PRETRAINED_MODEL_DIR / SAFETENSORS_SINGLE_FILE
+    return model_file.is_file()
+
+
+def resolve_checkpoints_dir(candidates: list[Path]) -> Path | None:
+    """Return the first checkpoints dir that contains a complete best model."""
+    for checkpoints_dir in candidates:
+        best_dir = checkpoints_dir / "best"
+        if is_best_model_complete(best_dir):
+            return checkpoints_dir
+    return None
+
+
+def generate_best_hub_repo_id(
+    *,
+    prefix: str,
+    best_step: int,
+    best_eval_loss: float,
+    when: datetime | None = None,
+) -> str:
+    """Build a unique Hub repo id, e.g. user/job-step3000-eval03561-20260625."""
+    when = when or datetime.now(timezone.utc)
+    loss_tag = f"{best_eval_loss:.4f}".replace(".", "")
+    slug = f"step{best_step}-eval{loss_tag}-{when.strftime('%Y%m%d')}"
+    slug = re.sub(r"[^a-zA-Z0-9._-]", "-", slug)
+
+    if "/" in prefix:
+        owner, name = prefix.split("/", 1)
+        return f"{owner}/{name}-{slug}"
+
+    api = HfApi()
+    owner = api.whoami()["name"]
+    return f"{owner}/{prefix}-{slug}"
+
+
+def save_best_hub_push_meta(checkpoints_dir: Path, repo_id: str, repo_url: str) -> None:
+    meta_path = checkpoints_dir / HUB_BEST_PUSH_META_FILE
+    meta_path.write_text(
+        json.dumps(
+            {
+                "repo_id": repo_id,
+                "repo_url": repo_url,
+                "pushed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def load_best_hub_push_meta(checkpoints_dir: Path) -> dict | None:
+    meta_path = checkpoints_dir / HUB_BEST_PUSH_META_FILE
+    if not meta_path.is_file():
+        return None
+    return json.loads(meta_path.read_text())
+
+
+def push_best_checkpoint_folder(
+    best_dir: Path,
+    *,
+    repo_id: str,
+    private: bool,
+    best_step: int,
+    best_eval_loss: float,
+    checkpoints_dir: Path | None = None,
+) -> str:
+    """Upload saved best weights from disk (no GPU load required)."""
+    model_dir = best_dir / PRETRAINED_MODEL_DIR
+    if not is_best_model_complete(best_dir):
+        raise FileNotFoundError(f"Best checkpoint not found or incomplete: {best_dir}")
+
+    api = HfApi()
+    api.create_repo(repo_id=repo_id, repo_type="model", private=private, exist_ok=True)
+
+    readme = model_dir / "README.md"
+    readme.write_text(
+        "\n".join(
+            [
+                "---",
+                "license: apache-2.0",
+                "tags:",
+                "  - robotics",
+                "  - lerobot",
+                "  - molmoact2",
+                "---",
+                "",
+                f"# {repo_id}",
+                "",
+                "Fine-tuned MolmoAct2 best checkpoint.",
+                "",
+                f"- Best eval loss: `{best_eval_loss:.4f}`",
+                f"- Best step: `{best_step}`",
+                f"- Pushed at: `{datetime.now(timezone.utc).isoformat()}`",
+                "",
+            ]
+        )
+    )
+
+    logger.info("Pushing best checkpoint (%s) to Hub: %s", model_dir, repo_id)
+    commit_info = api.upload_folder(
+        folder_path=model_dir,
+        path_in_repo=".",
+        repo_id=repo_id,
+        repo_type="model",
+        commit_message=f"Upload best checkpoint (step {best_step}, eval {best_eval_loss:.4f})",
+    )
+
+    repo_url = commit_info.repo_url.url if commit_info.repo_url else f"https://huggingface.co/{repo_id}"
+    if checkpoints_dir is not None:
+        save_best_hub_push_meta(checkpoints_dir, repo_id, repo_url)
+    logger.info("Best checkpoint pushed to %s", repo_url)
+    return repo_url
 
 
 def is_complete_checkpoint(ckpt_dir: Path) -> bool:

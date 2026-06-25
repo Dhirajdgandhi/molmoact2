@@ -1,5 +1,6 @@
 """Training configuration for MolmoAct2 fine-tuning on record-test dataset."""
 
+import os
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -7,7 +8,10 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
+# Checkpoints are ~13 GB each; default to /tmp on small SageMaker home volumes.
+OUTPUT_DIR = Path(
+    os.environ.get("MOLMOACT2_OUTPUT_DIR", "/tmp/molmoact2-record-test/outputs")
+)
 
 SOURCE_DATASET_REPO = "dhirajdg/record-test_20260607_235017"
 TRAIN_DATASET_REPO = "dhirajdg/record-test_20260607_235017_train"
@@ -43,7 +47,7 @@ JOB_NAME = "molmoact2-record-test"
 SEED = 42
 
 STEPS = 3_000
-BATCH_SIZE = 2  # L4 23GB: bs=8 OOMs with LoRA MolmoAct2
+BATCH_SIZE = 2  # L4 22GB VRAM: bs=8 OOMs; only one train.py process may run at a time
 NUM_WORKERS = 2
 VIDEO_BACKEND = "pyav"  # avoid torchcodec/ffmpeg issues in DataLoader workers
 EVAL_NUM_WORKERS = 0
@@ -51,9 +55,10 @@ LOG_FREQ = 20
 EVAL_EVERY = 100
 SAVE_FREQ = 500
 
-# Checkpoint retention (~22 GB each). Keeps 1 periodic + 1 best on disk.
+# Checkpoint retention (~13 GB periodic, ~11 GB best weights-only). Keeps 1 periodic + best.
 KEEP_LAST_N_CHECKPOINTS = 1
 SAVE_BEST_CHECKPOINT = True
+SAVE_BEST_MODEL_ONLY = True  # deployable weights only; resume uses periodic checkpoints
 BEST_CHECKPOINT_DIR = "best"
 
 # Hugging Face Hub (requires `hf auth login`). Mirrors local prune+best strategy:
@@ -62,6 +67,9 @@ BEST_CHECKPOINT_DIR = "best"
 PUSH_TO_HUB = True
 HUB_REPO_ID = "dhirajdg/molmoact2-record-test"
 HUB_PRIVATE = True
+# Each best-checkpoint push gets a unique repo: prefix-step{N}-eval{loss}-{date}
+HUB_BEST_REPO_PREFIX = "dhirajdg/molmoact2-record-test"
+HUB_USE_UNIQUE_BEST_REPO = True
 
 # Memory-friendly preset for L4 23GB. Action-expert-only uses less VRAM than LoRA+both.
 ENABLE_LORA_VLM = False

@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import env_setup  # noqa: F401  # must run before huggingface imports
 
+import atexit
+import fcntl
+import gc
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -25,6 +29,51 @@ import prepare_dataset
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+TRAIN_LOCK_PATH = Path(
+    os.environ.get("MOLMOACT2_TRAIN_LOCK", "/tmp/molmoact2-record-test.train.lock")
+)
+
+
+class TrainInstanceLock:
+    """Process-wide lock so only one training job loads the model onto the GPU."""
+
+    def __init__(self, lock_path: Path) -> None:
+        self.lock_path = lock_path
+        self._fh = None
+
+    def __enter__(self) -> TrainInstanceLock:
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.lock_path, "w")
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"Another molmoact2 training instance holds {self.lock_path}. "
+                "Run `./stop_train.sh` before starting again."
+            ) from exc
+        self._fh.write(f"{os.getpid()}\n")
+        self._fh.flush()
+        atexit.register(self.release)
+        return self
+
+    def release(self) -> None:
+        if self._fh is None:
+            return
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        self._fh.close()
+        self._fh = None
+
+
+def _release_cuda_cache() -> None:
+    """Drop temporary GPU allocations after eval / checkpoint saves."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 def _build_policy_config():
@@ -127,6 +176,7 @@ def evaluate(
             totals[key] = totals.get(key, 0.0) + float(value)
 
     policy.train()
+    _release_cuda_cache()
     if count == 0:
         return {}
     return {f"eval/{k}": v / count for k, v in totals.items()}
@@ -161,6 +211,26 @@ def _save_training_checkpoint(
         num_processes=accelerator.num_processes,
         batch_size=config.BATCH_SIZE,
     )
+
+
+def _save_best_model_checkpoint(
+    *,
+    ckpt_dir: Path,
+    policy,
+    preprocessor,
+    postprocessor,
+) -> None:
+    """Save deployable policy weights only (no optimizer state) to save disk."""
+    from lerobot.utils.constants import PRETRAINED_MODEL_DIR
+
+    ckpt_dir.parent.mkdir(parents=True, exist_ok=True)
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    model_dir = ckpt_dir / PRETRAINED_MODEL_DIR
+    model_dir.mkdir(parents=True, exist_ok=True)
+    policy.save_pretrained(model_dir)
+    preprocessor.save_pretrained(model_dir)
+    postprocessor.save_pretrained(model_dir)
 
 
 def train() -> Path:
@@ -427,27 +497,59 @@ def train() -> Path:
 
                     if config.SAVE_BEST_CHECKPOINT:
                         best_dir = checkpoints_dir / config.BEST_CHECKPOINT_DIR
-                        _save_training_checkpoint(
-                            ckpt_dir=best_dir,
-                            step=step + 1,
-                            train_cfg=train_cfg,
-                            policy=accelerator.unwrap_model(policy),
-                            optimizer=optimizer,
-                            lr_scheduler=lr_scheduler,
-                            preprocessor=preprocessor,
-                            postprocessor=postprocessor,
-                            accelerator=accelerator,
-                        )
-                        logger.info("Saved best checkpoint: %s", best_dir)
-                        if config.PUSH_TO_HUB and config.HUB_REPO_ID and hub_auth_ok:
-                            checkpoint_utils.push_best_to_hub(
-                                accelerator.unwrap_model(policy),
-                                train_cfg,
-                                repo_id=config.HUB_REPO_ID,
-                                private=config.HUB_PRIVATE,
+                        if config.SAVE_BEST_MODEL_ONLY:
+                            _save_best_model_checkpoint(
+                                ckpt_dir=best_dir,
+                                policy=accelerator.unwrap_model(policy),
+                                preprocessor=preprocessor,
+                                postprocessor=postprocessor,
                             )
+                        else:
+                            _save_training_checkpoint(
+                                ckpt_dir=best_dir,
+                                step=step + 1,
+                                train_cfg=train_cfg,
+                                policy=accelerator.unwrap_model(policy),
+                                optimizer=optimizer,
+                                lr_scheduler=lr_scheduler,
+                                preprocessor=preprocessor,
+                                postprocessor=postprocessor,
+                                accelerator=accelerator,
+                            )
+                        logger.info("Saved best checkpoint: %s", best_dir)
+                        if config.PUSH_TO_HUB and hub_auth_ok:
+                            hub_repo_id = (
+                                checkpoint_utils.generate_best_hub_repo_id(
+                                    prefix=config.HUB_BEST_REPO_PREFIX,
+                                    best_step=best_step,
+                                    best_eval_loss=best_eval_loss,
+                                )
+                                if config.HUB_USE_UNIQUE_BEST_REPO
+                                else config.HUB_REPO_ID
+                            )
+                            try:
+                                checkpoint_utils.push_best_checkpoint_folder(
+                                    best_dir,
+                                    repo_id=hub_repo_id,
+                                    private=config.HUB_PRIVATE,
+                                    best_step=best_step,
+                                    best_eval_loss=best_eval_loss,
+                                    checkpoints_dir=checkpoints_dir,
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "Hub push (best) failed — training continues. %s: %s",
+                                    type(exc).__name__,
+                                    exc,
+                                )
+                        _release_cuda_cache()
 
         if is_save and is_main:
+            # Free an old periodic checkpoint before writing (~13 GB) to avoid ENOSPC.
+            checkpoint_utils.prune_old_checkpoints(
+                checkpoints_dir,
+                keep_last_n=max(0, config.KEEP_LAST_N_CHECKPOINTS - 1),
+            )
             ckpt_dir = get_step_checkpoint_dir(output_dir, config.STEPS, step + 1)
             _save_training_checkpoint(
                 ckpt_dir=ckpt_dir,
@@ -472,6 +574,7 @@ def train() -> Path:
                     repo_id=config.HUB_REPO_ID,
                     private=config.HUB_PRIVATE,
                 )
+            _release_cuda_cache()
 
         if is_main:
             pbar.update(1)
@@ -494,7 +597,11 @@ def train() -> Path:
 
 def main() -> None:
     try:
-        train()
+        with TrainInstanceLock(TRAIN_LOCK_PATH):
+            train()
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
     except KeyboardInterrupt:
         logger.info("Training interrupted.")
         sys.exit(1)
