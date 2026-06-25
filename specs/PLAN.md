@@ -61,6 +61,7 @@ molmoact2-record-test/
 │   ├── config.py           # All hyperparameters and paths
 │   ├── prepare_dataset.py  # 90/10 split + stats recompute
 │   ├── train.py            # Training + eval loss logging
+│   ├── run_train.sh        # Start training via nohup (recommended entrypoint)
 │   └── requirements.txt
 ├── data/                   # Local train/val datasets (created by prepare)
 └── outputs/                # Checkpoints and logs (created by train)
@@ -72,5 +73,8 @@ molmoact2-record-test/
 cd molmoact2-record-test/scripts
 pip install -r requirements.txt
 python prepare_dataset.py   # once
-python train.py
+./run_train.sh              # always use this — runs training via nohup
+tail -f ../outputs/train.log
 ```
+
+**Important:** Use `./run_train.sh`, not `python train.py`. Training runs for ~55 minutes; `nohup` keeps it alive if the IDE or chat session disconnects.

@@ -12,8 +12,6 @@ import env_setup  # noqa: F401  # must run before huggingface imports
 import logging
 import shutil
 import sys
-import time
-from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -22,6 +20,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import config
+import checkpoint_utils
 import prepare_dataset
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -52,8 +51,25 @@ def _build_policy_config():
         optimizer_connector_lr=config.OPTIMIZER_CONNECTOR_LR,
         optimizer_action_expert_lr=config.OPTIMIZER_ACTION_EXPERT_LR,
         scheduler_warmup_steps=config.SCHEDULER_WARMUP_STEPS,
-        push_to_hub=False,
+        push_to_hub=config.PUSH_TO_HUB,
+        repo_id=config.HUB_REPO_ID,
+        private=config.HUB_PRIVATE,
         device="cuda",
+    )
+
+
+def _make_train_sampler(dataset):
+    from lerobot.datasets import EpisodeAwareSampler
+
+    policy_cfg = _build_policy_config()
+    drop_n = max(0, policy_cfg.chunk_size - 1)
+    return EpisodeAwareSampler(
+        dataset.meta.episodes["dataset_from_index"],
+        dataset.meta.episodes["dataset_to_index"],
+        episode_indices_to_use=list(range(dataset.meta.total_episodes)),
+        drop_n_last_frames=drop_n,
+        shuffle=True,
+        seed=config.SEED,
     )
 
 
@@ -62,25 +78,15 @@ def _make_dataloader(
     batch_size: int,
     shuffle: bool,
     *,
+    sampler=None,
     num_workers: int | None = None,
 ):
-    from lerobot.datasets import EpisodeAwareSampler
     from lerobot.utils.collate import lerobot_collate_fn
 
     collate_fn = lerobot_collate_fn if dataset.meta.has_language_columns else None
 
-    sampler = None
     shuffle_loader = shuffle
-    if shuffle and hasattr(dataset, "meta") and dataset.meta.episodes is not None:
-        policy_cfg = _build_policy_config()
-        drop_n = max(0, policy_cfg.chunk_size - 1)
-        sampler = EpisodeAwareSampler(
-            dataset.meta.episodes["dataset_from_index"],
-            dataset.meta.episodes["dataset_to_index"],
-            episode_indices_to_use=list(range(dataset.meta.total_episodes)),
-            drop_n_last_frames=drop_n,
-            shuffle=True,
-        )
+    if sampler is not None:
         shuffle_loader = False
 
     workers = config.NUM_WORKERS if num_workers is None else num_workers
@@ -126,6 +132,37 @@ def evaluate(
     return {f"eval/{k}": v / count for k, v in totals.items()}
 
 
+def _save_training_checkpoint(
+    *,
+    ckpt_dir: Path,
+    step: int,
+    train_cfg,
+    policy,
+    optimizer,
+    lr_scheduler,
+    preprocessor,
+    postprocessor,
+    accelerator: Accelerator,
+) -> None:
+    from lerobot.common.train_utils import save_checkpoint
+
+    ckpt_dir.parent.mkdir(parents=True, exist_ok=True)
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    save_checkpoint(
+        ckpt_dir,
+        step,
+        train_cfg,
+        policy,
+        optimizer,
+        lr_scheduler,
+        preprocessor,
+        postprocessor,
+        num_processes=accelerator.num_processes,
+        batch_size=config.BATCH_SIZE,
+    )
+
+
 def train() -> Path:
     from lerobot.common.wandb_utils import WandBLogger
     from lerobot.configs.default import DatasetConfig, WandBConfig
@@ -136,7 +173,15 @@ def train() -> Path:
     from lerobot.policies.factory import make_policy, make_pre_post_processors
     from lerobot.transforms import ImageTransformsConfig
     from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
-    from lerobot.utils.constants import CHECKPOINTS_DIR
+    from lerobot.utils.constants import CHECKPOINTS_DIR, PRETRAINED_MODEL_DIR
+    from lerobot.common.train_utils import (
+        get_step_checkpoint_dir,
+        load_training_batch_size,
+        load_training_num_processes,
+        load_training_state,
+        update_last_checkpoint,
+    )
+    from lerobot.datasets.sampler import compute_sampler_state
     from lerobot.utils.random_utils import set_seed
     from lerobot.utils.utils import cycle, init_logging
 
@@ -150,17 +195,31 @@ def train() -> Path:
 
     output_dir = config.OUTPUT_DIR / config.JOB_NAME
     checkpoints_dir = output_dir / CHECKPOINTS_DIR
+    checkpoint_utils.remove_incomplete_checkpoints(checkpoints_dir)
+
     resume = False
+    resume_ckpt_dir: Path | None = None
     if output_dir.exists():
-        if checkpoints_dir.exists() and any(checkpoints_dir.iterdir()):
+        resume_ckpt_dir = checkpoint_utils.find_resume_checkpoint(checkpoints_dir)
+        if resume_ckpt_dir is not None:
             resume = True
-            logger.info("Resuming from checkpoints in %s", output_dir)
+            logger.info("Resuming from checkpoint: %s", resume_ckpt_dir)
+        elif checkpoints_dir.exists() and any(checkpoints_dir.iterdir()):
+            logger.info("Only incomplete or best-only checkpoints found — starting fresh.")
+            shutil.rmtree(output_dir)
         else:
             logger.info("Removing incomplete output dir: %s", output_dir)
             shutil.rmtree(output_dir)
 
     policy_cfg = _build_policy_config()
+    if config.PUSH_TO_HUB and not config.HUB_REPO_ID:
+        raise ValueError("PUSH_TO_HUB=True requires HUB_REPO_ID in config.py")
     policy_cfg.apply_norm_tag_metadata()
+
+    pretrained_dir: Path | None = None
+    if resume_ckpt_dir is not None:
+        pretrained_dir = resume_ckpt_dir / PRETRAINED_MODEL_DIR
+        policy_cfg.pretrained_path = pretrained_dir
 
     train_cfg = TrainPipelineConfig(
         dataset=DatasetConfig(
@@ -187,9 +246,13 @@ def train() -> Path:
             entity=config.WANDB_ENTITY,
         ),
     )
-    train_cfg.validate()
     train_cfg.optimizer = policy_cfg.get_optimizer_preset()
     train_cfg.scheduler = policy_cfg.get_scheduler_preset()
+
+    if resume:
+        train_cfg.checkpoint_path = resume_ckpt_dir
+    else:
+        train_cfg.validate()
 
     accelerator = Accelerator(mixed_precision="bf16")
     is_main = accelerator.is_main_process
@@ -206,13 +269,45 @@ def train() -> Path:
     )
 
     policy = make_policy(policy_cfg, ds_meta=train_dataset.meta)
+    processor_kwargs = {}
+    if pretrained_dir is None:
+        processor_kwargs["dataset_stats"] = train_dataset.meta.stats
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg,
-        dataset_stats=train_dataset.meta.stats,
+        pretrained_path=str(pretrained_dir) if pretrained_dir is not None else None,
+        **processor_kwargs,
     )
     optimizer, lr_scheduler = make_optimizer_and_scheduler(train_cfg, policy)
 
-    train_loader = _make_dataloader(train_dataset, config.BATCH_SIZE, shuffle=True)
+    start_step = 0
+    if resume_ckpt_dir is not None:
+        start_step, optimizer, lr_scheduler = load_training_state(
+            resume_ckpt_dir, optimizer, lr_scheduler
+        )
+        logger.info("Loaded training state at step %d", start_step)
+
+    train_sampler = None
+    if hasattr(train_dataset, "meta") and train_dataset.meta.episodes is not None:
+        train_sampler = _make_train_sampler(train_dataset)
+        if resume and start_step > 0:
+            saved_num_processes = load_training_num_processes(resume_ckpt_dir) or 1
+            saved_batch_size = load_training_batch_size(resume_ckpt_dir) or config.BATCH_SIZE
+            sampler_state = compute_sampler_state(
+                start_step, len(train_sampler), saved_batch_size, saved_num_processes
+            )
+            train_sampler.load_state_dict(sampler_state)
+            logger.info(
+                "Resuming data order at epoch %d, sample %d",
+                sampler_state["epoch"],
+                sampler_state["start_index"],
+            )
+
+    train_loader = _make_dataloader(
+        train_dataset,
+        config.BATCH_SIZE,
+        shuffle=True,
+        sampler=train_sampler,
+    )
     val_loader = _make_dataloader(
         val_dataset,
         config.BATCH_SIZE,
@@ -237,11 +332,13 @@ def train() -> Path:
         train_dataset.num_frames,
         train_dataset.num_episodes,
         train_metrics,
+        initial_step=start_step,
         accelerator=accelerator,
     )
 
-    best_eval_loss = float("inf")
-    best_step = 0
+    best_eval_loss, best_step = checkpoint_utils.load_best_meta(checkpoints_dir)
+    if resume and best_step > 0:
+        logger.info("Restored best eval loss %.4f at step %d", best_eval_loss, best_step)
 
     if is_main:
         logger.info("Output dir: %s", output_dir)
@@ -252,10 +349,16 @@ def train() -> Path:
             val_dataset.num_episodes,
             val_dataset.num_frames,
         )
-        logger.info("Steps: %d | Batch size: %d | Eval every: %d", config.STEPS, config.BATCH_SIZE, config.EVAL_EVERY)
-        pbar = tqdm(total=config.STEPS, desc="Training", unit="step")
+        logger.info(
+            "Steps: %d (starting at %d) | Batch size: %d | Eval every: %d",
+            config.STEPS,
+            start_step,
+            config.BATCH_SIZE,
+            config.EVAL_EVERY,
+        )
+        pbar = tqdm(total=config.STEPS, initial=start_step, desc="Training", unit="step")
 
-    for step in range(config.STEPS):
+    for step in range(start_step, config.STEPS):
         batch = next(dl_iter)
         for cam_key in train_dataset.meta.camera_keys:
             if cam_key in batch and batch[cam_key].dtype == torch.uint8:
@@ -319,29 +422,64 @@ def train() -> Path:
                     best_eval_loss = eval_loss
                     best_step = step + 1
                     logger.info("New best eval loss %.4f at step %d", best_eval_loss, best_step)
+                    checkpoint_utils.save_best_meta(checkpoints_dir, best_eval_loss, best_step)
+
+                    if config.SAVE_BEST_CHECKPOINT:
+                        best_dir = checkpoints_dir / config.BEST_CHECKPOINT_DIR
+                        _save_training_checkpoint(
+                            ckpt_dir=best_dir,
+                            step=step + 1,
+                            train_cfg=train_cfg,
+                            policy=accelerator.unwrap_model(policy),
+                            optimizer=optimizer,
+                            lr_scheduler=lr_scheduler,
+                            preprocessor=preprocessor,
+                            postprocessor=postprocessor,
+                            accelerator=accelerator,
+                        )
+                        logger.info("Saved best checkpoint: %s", best_dir)
+                        if config.PUSH_TO_HUB and config.HUB_REPO_ID:
+                            checkpoint_utils.push_best_to_hub(
+                                accelerator.unwrap_model(policy),
+                                train_cfg,
+                                repo_id=config.HUB_REPO_ID,
+                                private=config.HUB_PRIVATE,
+                            )
 
         if is_save and is_main:
-            from lerobot.common.train_utils import get_step_checkpoint_dir, save_checkpoint
-
             ckpt_dir = get_step_checkpoint_dir(output_dir, config.STEPS, step + 1)
-            save_checkpoint(
-                ckpt_dir,
-                step + 1,
-                train_cfg,
-                accelerator.unwrap_model(policy),
-                optimizer,
-                lr_scheduler,
-                preprocessor,
-                postprocessor,
+            _save_training_checkpoint(
+                ckpt_dir=ckpt_dir,
+                step=step + 1,
+                train_cfg=train_cfg,
+                policy=accelerator.unwrap_model(policy),
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                accelerator=accelerator,
             )
+            update_last_checkpoint(ckpt_dir)
             logger.info("Saved checkpoint: %s", ckpt_dir)
+            checkpoint_utils.prune_old_checkpoints(
+                checkpoints_dir,
+                keep_last_n=config.KEEP_LAST_N_CHECKPOINTS,
+            )
+            if config.PUSH_TO_HUB and config.HUB_REPO_ID:
+                checkpoint_utils.push_resume_to_hub(
+                    ckpt_dir,
+                    repo_id=config.HUB_REPO_ID,
+                    private=config.HUB_PRIVATE,
+                )
 
         if is_main:
             pbar.update(1)
 
     if is_main:
         pbar.close()
+        checkpoint_utils.save_best_meta(checkpoints_dir, best_eval_loss, best_step)
         logger.info("Training complete. Best eval loss: %.4f at step %d", best_eval_loss, best_step)
+        logger.info("Best checkpoint: %s", checkpoints_dir / config.BEST_CHECKPOINT_DIR)
         logger.info("Checkpoints and logs: %s", output_dir)
         if wandb_logger:
             wandb_logger.log_dict(

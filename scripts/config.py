@@ -51,6 +51,18 @@ LOG_FREQ = 20
 EVAL_EVERY = 100
 SAVE_FREQ = 500
 
+# Checkpoint retention (~22 GB each). Keeps 1 periodic + 1 best on disk.
+KEEP_LAST_N_CHECKPOINTS = 1
+SAVE_BEST_CHECKPOINT = True
+BEST_CHECKPOINT_DIR = "best"
+
+# Hugging Face Hub (requires `hf auth login`). Mirrors local prune+best strategy:
+# - best eval → repo root (deployable model)
+# - latest periodic → resume/ (full checkpoint for cross-machine resume)
+PUSH_TO_HUB = True
+HUB_REPO_ID = "dhirajdg/molmoact2-record-test"
+HUB_PRIVATE = True
+
 # Memory-friendly preset for L4 23GB. Action-expert-only uses less VRAM than LoRA+both.
 ENABLE_LORA_VLM = False
 TRAIN_ACTION_EXPERT_ONLY = True
