@@ -10,6 +10,7 @@ from __future__ import annotations
 import env_setup  # noqa: F401  # must run before huggingface imports
 
 import logging
+import shutil
 import sys
 import time
 from contextlib import nullcontext
@@ -135,6 +136,7 @@ def train() -> Path:
     from lerobot.policies.factory import make_policy, make_pre_post_processors
     from lerobot.transforms import ImageTransformsConfig
     from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
+    from lerobot.utils.constants import CHECKPOINTS_DIR
     from lerobot.utils.random_utils import set_seed
     from lerobot.utils.utils import cycle, init_logging
 
@@ -147,8 +149,15 @@ def train() -> Path:
     set_seed(config.SEED)
 
     output_dir = config.OUTPUT_DIR / config.JOB_NAME
-    if output_dir.exists() and not any(output_dir.iterdir()):
-        output_dir.rmdir()
+    checkpoints_dir = output_dir / CHECKPOINTS_DIR
+    resume = False
+    if output_dir.exists():
+        if checkpoints_dir.exists() and any(checkpoints_dir.iterdir()):
+            resume = True
+            logger.info("Resuming from checkpoints in %s", output_dir)
+        else:
+            logger.info("Removing incomplete output dir: %s", output_dir)
+            shutil.rmtree(output_dir)
 
     policy_cfg = _build_policy_config()
     policy_cfg.apply_norm_tag_metadata()
@@ -163,6 +172,7 @@ def train() -> Path:
         policy=policy_cfg,
         output_dir=output_dir,
         job_name=config.JOB_NAME,
+        resume=resume,
         seed=config.SEED,
         num_workers=config.NUM_WORKERS,
         batch_size=config.BATCH_SIZE,
