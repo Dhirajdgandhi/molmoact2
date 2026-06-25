@@ -114,12 +114,17 @@ def push_best_to_hub(
     *,
     repo_id: str,
     private: bool,
-) -> None:
+) -> bool:
     """Upload the current policy weights to the Hub repo root (deployable model)."""
-    policy.config.repo_id = repo_id
-    policy.config.private = private
-    logger.info("Pushing best checkpoint to Hub: %s", repo_id)
-    policy.push_model_to_hub(train_cfg)
+    try:
+        policy.config.repo_id = repo_id
+        policy.config.private = private
+        logger.info("Pushing best checkpoint to Hub: %s", repo_id)
+        policy.push_model_to_hub(train_cfg)
+        return True
+    except Exception as exc:
+        logger.warning("Hub push (best) failed — training continues. %s: %s", type(exc).__name__, exc)
+        return False
 
 
 def push_resume_to_hub(
@@ -127,19 +132,39 @@ def push_resume_to_hub(
     *,
     repo_id: str,
     private: bool,
-) -> None:
+) -> bool:
     """Upload the latest full checkpoint under `resume/` for cross-machine resume."""
-    api = HfApi()
-    api.create_repo(repo_id=repo_id, repo_type="model", private=private, exist_ok=True)
     try:
-        api.delete_folder(repo_id=repo_id, path_in_repo=HUB_RESUME_PREFIX, repo_type="model")
-    except Exception:
-        pass
-    logger.info("Pushing resume checkpoint to Hub: %s/%s", repo_id, HUB_RESUME_PREFIX)
-    api.upload_folder(
-        folder_path=ckpt_dir,
-        path_in_repo=HUB_RESUME_PREFIX,
-        repo_id=repo_id,
-        repo_type="model",
-        commit_message=f"Update resume checkpoint (step {ckpt_dir.name})",
-    )
+        api = HfApi()
+        api.create_repo(repo_id=repo_id, repo_type="model", private=private, exist_ok=True)
+        try:
+            api.delete_folder(repo_id=repo_id, path_in_repo=HUB_RESUME_PREFIX, repo_type="model")
+        except Exception:
+            pass
+        logger.info("Pushing resume checkpoint to Hub: %s/%s", repo_id, HUB_RESUME_PREFIX)
+        api.upload_folder(
+            folder_path=ckpt_dir,
+            path_in_repo=HUB_RESUME_PREFIX,
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message=f"Update resume checkpoint (step {ckpt_dir.name})",
+        )
+        return True
+    except Exception as exc:
+        logger.warning("Hub push (resume) failed — training continues. %s: %s", type(exc).__name__, exc)
+        return False
+
+
+def verify_hub_auth() -> bool:
+    """Return True when the current process can authenticate with the Hub."""
+    try:
+        HfApi().whoami()
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Hugging Face Hub is not authenticated in this process (%s: %s). "
+            "Run `hf auth login` before `./run_train.sh`, or set PUSH_TO_HUB=False.",
+            type(exc).__name__,
+            exc,
+        )
+        return False

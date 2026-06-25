@@ -214,6 +214,7 @@ def train() -> Path:
     policy_cfg = _build_policy_config()
     if config.PUSH_TO_HUB and not config.HUB_REPO_ID:
         raise ValueError("PUSH_TO_HUB=True requires HUB_REPO_ID in config.py")
+    hub_auth_ok = not config.PUSH_TO_HUB or checkpoint_utils.verify_hub_auth()
     policy_cfg.apply_norm_tag_metadata()
 
     pretrained_dir: Path | None = None
@@ -438,7 +439,7 @@ def train() -> Path:
                             accelerator=accelerator,
                         )
                         logger.info("Saved best checkpoint: %s", best_dir)
-                        if config.PUSH_TO_HUB and config.HUB_REPO_ID:
+                        if config.PUSH_TO_HUB and config.HUB_REPO_ID and hub_auth_ok:
                             checkpoint_utils.push_best_to_hub(
                                 accelerator.unwrap_model(policy),
                                 train_cfg,
@@ -465,7 +466,7 @@ def train() -> Path:
                 checkpoints_dir,
                 keep_last_n=config.KEEP_LAST_N_CHECKPOINTS,
             )
-            if config.PUSH_TO_HUB and config.HUB_REPO_ID:
+            if config.PUSH_TO_HUB and config.HUB_REPO_ID and hub_auth_ok:
                 checkpoint_utils.push_resume_to_hub(
                     ckpt_dir,
                     repo_id=config.HUB_REPO_ID,
