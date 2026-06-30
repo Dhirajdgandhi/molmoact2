@@ -1,0 +1,12 @@
+.git
+.gitignore
+data/
+outputs/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+wandb/
+.env
+.cursor/
+specs/

@@ -10,10 +10,23 @@ Fine-tune [MolmoAct2](https://huggingface.co/allenai/MolmoAct2-SO100_101) on a L
 ## Setup
 
 ```bash
+cp .env.example .env   # set HF_TOKEN, GIT_USERNAME, GIT_TOKEN
 cd scripts
 pip install -r requirements.txt
 hf auth login
 ```
+
+`GIT_TOKEN` must be a [GitHub Personal Access Token](https://github.com/settings/tokens) with `repo` scope (account passwords no longer work over HTTPS).
+
+## Push code
+
+After committing locally:
+
+```bash
+./scripts/push_code.sh
+```
+
+Loads `GIT_USERNAME` and `GIT_TOKEN` from `.env` and pushes to `origin` without prompting.
 
 ## Usage
 
@@ -41,6 +54,43 @@ kill "$(cat ../outputs/train.pid)"
 
 Edit hyperparameters in `scripts/config.py`.
 
+## Offline evaluation
+
+Evaluate a deployed Hugging Face checkpoint on the held-out val split (no robot required):
+
+```bash
+cd scripts
+./run_eval.sh --checkpoint dhirajdg/molmoact2-record-test-step3000-eval03562-20260625
+```
+
+`run_eval.sh` loads `HF_TOKEN` from the environment, project `.env`, or `~/.cache/huggingface/token` (after `hf auth login`).
+
+Results are written to `outputs/offline_eval.json`.
+
+Quick smoke test (first 5 batches):
+
+```bash
+./run_eval.sh --checkpoint dhirajdg/molmoact2-record-test-step3000-eval03562-20260625 --max-batches 5
+```
+
+## Docker (reproducible on ephemeral instances)
+
+Build once, then run eval on any GPU host without reinstalling dependencies:
+
+```bash
+# From repo root
+docker build -t molmoact2-eval .
+
+docker run --rm --gpus all \
+  -e HF_TOKEN="$HF_TOKEN" \
+  -v molmoact2-hf-cache:/tmp/huggingface \
+  -v "$(pwd)/outputs:/app/outputs" \
+  molmoact2-eval \
+  --checkpoint dhirajdg/molmoact2-record-test-step3000-eval03562-20260625
+```
+
+Copy `.env.example` to `.env` and set your token, or pass `-e HF_TOKEN=...` directly. The volume mount keeps checkpoint downloads across container restarts.
+
 ## Project layout
 
 ```
@@ -50,8 +100,11 @@ scripts/
   prepare_dataset.py   # Dataset split + stats
   train.py             # Training + eval loss logging
   run_train.sh         # Start training via nohup (use this, not train.py directly)
+  run_eval.sh          # Offline eval from a local or Hub checkpoint
+  eval_offline.py      # Eval implementation (teacher-forcing + open-loop MSE)
   env_setup.py         # HF cache on /tmp for large checkpoints
   requirements.txt
+Dockerfile             # Reproducible GPU eval image
 ```
 
 See `specs/PLAN.md` for what to watch in training/eval loss curves.

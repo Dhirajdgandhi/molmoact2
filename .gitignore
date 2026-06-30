@@ -16,3 +16,6 @@ venv/
 
 # WandB
 wandb/
+
+# Secrets
+.env

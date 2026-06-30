@@ -1,4 +1,4 @@
-lerobot[molmoact2] @ git+https://github.com/huggingface/lerobot.git
+lerobot[molmoact2,dataset] @ git+https://github.com/huggingface/lerobot.git
 scipy
 accelerate
 wandb
