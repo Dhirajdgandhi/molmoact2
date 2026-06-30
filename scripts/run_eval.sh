@@ -5,6 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+"$SCRIPT_DIR/sync_secrets.sh" >/dev/null
+
 if [[ -f "$PROJECT_ROOT/.env" ]]; then
   set -a
   # shellcheck source=/dev/null

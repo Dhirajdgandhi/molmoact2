@@ -10,11 +10,19 @@ Fine-tune [MolmoAct2](https://huggingface.co/allenai/MolmoAct2-SO100_101) on a L
 ## Setup
 
 ```bash
-cp .env.example .env   # set HF_TOKEN, GIT_USERNAME, GIT_TOKEN
+cp .env.example .env   # or export HF_TOKEN, GIT_* and run sync below
+./scripts/sync_secrets.sh
 cd scripts
 pip install -r requirements.txt
-hf auth login
 ```
+
+`sync_secrets.sh` writes credentials from your shell environment or `.env` to:
+
+- `~/.cache/huggingface/token` (HF Hub)
+- `.git/credentials` + repo-local git credential helper (GitHub push)
+- `git config --global user.name` / `user.email` (commit identity)
+
+It runs automatically at the start of `run_eval.sh`, `push_code.sh`, and the Docker entrypoint.
 
 `GIT_TOKEN` must be a [GitHub Personal Access Token](https://github.com/settings/tokens) with `repo` scope (account passwords no longer work over HTTPS).
 
@@ -83,6 +91,10 @@ docker build -t molmoact2-eval .
 
 docker run --rm --gpus all \
   -e HF_TOKEN="$HF_TOKEN" \
+  -e GIT_USERNAME="$GIT_USERNAME" \
+  -e GIT_TOKEN="$GIT_TOKEN" \
+  -e GIT_USER_NAME="$GIT_USER_NAME" \
+  -e GIT_USER_EMAIL="$GIT_USER_EMAIL" \
   -v molmoact2-hf-cache:/tmp/huggingface \
   -v "$(pwd)/outputs:/app/outputs" \
   molmoact2-eval \
