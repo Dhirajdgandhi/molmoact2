@@ -10,6 +10,7 @@ FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
+    HF_HUB_DISABLE_XET=1 \
     HF_HOME=/tmp/huggingface \
     HUGGINGFACE_HUB_CACHE=/tmp/huggingface/hub \
     TRANSFORMERS_CACHE=/tmp/huggingface/hub \

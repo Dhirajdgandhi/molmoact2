@@ -12,7 +12,9 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import env_setup  # noqa: F401
@@ -55,8 +57,9 @@ def _candidate_checkpoints_dirs() -> list[Path]:
 
 
 def resolve_checkpoint_path(explicit: str | None) -> str | Path:
-    if explicit:
-        return explicit
+    checkpoint = explicit or os.environ.get("MOLMOACT2_CHECKPOINT")
+    if checkpoint:
+        return checkpoint
 
     checkpoints_dir = checkpoint_utils.resolve_checkpoints_dir(_candidate_checkpoints_dirs())
     if checkpoints_dir is not None:
@@ -69,8 +72,13 @@ def resolve_checkpoint_path(explicit: str | None) -> str | Path:
         if hub_meta and hub_meta.get("repo_id"):
             return hub_meta["repo_id"]
 
+    latest = checkpoint_utils.find_latest_hub_best_repo(config.HUB_BEST_REPO_PREFIX)
+    if latest:
+        logger.info("Auto-selected latest Hub best checkpoint: %s", latest)
+        return latest
+
     raise FileNotFoundError(
-        "No checkpoint found. Pass --checkpoint or train/push a best checkpoint first."
+        "No checkpoint found. Pass --checkpoint, set MOLMOACT2_CHECKPOINT, or push a best checkpoint to Hub."
     )
 
 
@@ -172,7 +180,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Offline val evaluation (no robot).")
     parser.add_argument(
         "--checkpoint",
-        help="Local pretrained_model path or Hub repo id. Default: best local or last Hub push.",
+        help=(
+            "Local pretrained_model path or Hub repo id. "
+            "Default: MOLMOACT2_CHECKPOINT env, local best, last Hub push, or latest Hub best."
+        ),
     )
     parser.add_argument("--batch-size", type=int, default=1, help="Use 1 to minimize VRAM during eval.")
     parser.add_argument(
@@ -235,10 +246,25 @@ def main() -> int:
             logger.info("  %s = %.6f", key, value)
         results.update(action_metrics)
 
-    out_path = config.PROJECT_ROOT / "outputs" / "offline_eval.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    results["_meta"] = {
+        "checkpoint": str(checkpoint),
+        "timestamp": timestamp,
+        "val_episodes": val_dataset.num_episodes,
+        "val_frames": val_dataset.num_frames,
+    }
+
+    outputs_dir = config.PROJECT_ROOT / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^a-zA-Z0-9._-]", "_", str(checkpoint).replace("/", "_"))
+    archive_path = outputs_dir / "eval_runs" / f"{slug}_{timestamp}.json"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_text(json.dumps(results, indent=2) + "\n")
+
+    out_path = outputs_dir / "offline_eval.json"
     out_path.write_text(json.dumps(results, indent=2) + "\n")
     logger.info("Wrote %s", out_path)
+    logger.info("Archived %s", archive_path)
     return 0
 
 

@@ -286,3 +286,34 @@ def verify_hub_auth() -> bool:
             exc,
         )
         return False
+
+
+def find_latest_hub_best_repo(prefix: str) -> str | None:
+    """Return the most recently updated unique best-checkpoint Hub repo under `prefix`."""
+    if not verify_hub_auth():
+        return None
+
+    api = HfApi()
+    if "/" not in prefix:
+        prefix = f"{api.whoami()['name']}/{prefix}"
+
+    owner, name = prefix.split("/", 1)
+    slug_prefix = f"{prefix}-step"
+
+    try:
+        models = list(
+            api.list_models(
+                author=owner,
+                search=name,
+                sort="lastModified",
+                limit=50,
+            )
+        )
+    except Exception as exc:
+        logger.warning("Could not list Hub models for %s: %s", prefix, exc)
+        return None
+
+    for model in models:
+        if model.id.startswith(slug_prefix):
+            return model.id
+    return None

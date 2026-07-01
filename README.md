@@ -64,44 +64,50 @@ Edit hyperparameters in `scripts/config.py`.
 
 ## Offline evaluation
 
-Evaluate a deployed Hugging Face checkpoint on the held-out val split (no robot required):
+**Fresh instance (once):**
 
 ```bash
-cd scripts
-./run_eval.sh --checkpoint dhirajdg/molmoact2-record-test-step3000-eval03562-20260625
+./scripts/setup.sh
 ```
 
-`run_eval.sh` loads `HF_TOKEN` from the environment, project `.env`, or `~/.cache/huggingface/token` (after `hf auth login`).
-
-Results are written to `outputs/offline_eval.json`.
-
-Quick smoke test (first 5 batches):
+**Run eval** — auto-picks the latest deployed Hub best checkpoint if you omit `--checkpoint`:
 
 ```bash
-./run_eval.sh --checkpoint dhirajdg/molmoact2-record-test-step3000-eval03562-20260625 --max-batches 5
+./scripts/run_eval.sh
 ```
+
+Pin a specific checkpoint or smoke-test:
+
+```bash
+./scripts/run_eval.sh --checkpoint dhirajdg/molmoact2-record-test-step3000-eval03562-20260625
+./scripts/run_eval.sh --max-batches 5          # first 5 val batches only
+./scripts/show_latest_checkpoint.sh            # print latest Hub repo id
+```
+
+Results: `outputs/offline_eval.json` (latest) and `outputs/eval_runs/<checkpoint>_<timestamp>.json` (history).
+
+Set `MOLMOACT2_CHECKPOINT` in `.env` to override the auto-selected checkpoint.
 
 ## Docker (reproducible on ephemeral instances)
 
-Build once, then run eval on any GPU host without reinstalling dependencies:
+```bash
+./scripts/docker_eval.sh                       # build image on first run, then eval
+./scripts/docker_eval.sh --max-batches 5
+```
+
+Or manually:
 
 ```bash
-# From repo root
 docker build -t molmoact2-eval .
 
 docker run --rm --gpus all \
   -e HF_TOKEN="$HF_TOKEN" \
-  -e GIT_USERNAME="$GIT_USERNAME" \
-  -e GIT_TOKEN="$GIT_TOKEN" \
-  -e GIT_USER_NAME="$GIT_USER_NAME" \
-  -e GIT_USER_EMAIL="$GIT_USER_EMAIL" \
   -v molmoact2-hf-cache:/tmp/huggingface \
   -v "$(pwd)/outputs:/app/outputs" \
-  molmoact2-eval \
-  --checkpoint dhirajdg/molmoact2-record-test-step3000-eval03562-20260625
+  molmoact2-eval
 ```
 
-Copy `.env.example` to `.env` and set your token, or pass `-e HF_TOKEN=...` directly. The volume mount keeps checkpoint downloads across container restarts.
+Copy `.env.example` to `.env` and set `HF_TOKEN`. The `molmoact2-hf-cache` volume keeps checkpoint downloads across container restarts.
 
 ## Project layout
 
@@ -112,7 +118,10 @@ scripts/
   prepare_dataset.py   # Dataset split + stats
   train.py             # Training + eval loss logging
   run_train.sh         # Start training via nohup (use this, not train.py directly)
-  run_eval.sh          # Offline eval from a local or Hub checkpoint
+  run_eval.sh          # Offline eval (auto latest Hub checkpoint)
+  docker_eval.sh       # Docker wrapper for eval
+  setup.sh             # Fresh-instance setup (pip + secrets + dirs)
+  show_latest_checkpoint.sh
   eval_offline.py      # Eval implementation (teacher-forcing + open-loop MSE)
   env_setup.py         # HF cache on /tmp for large checkpoints
   requirements.txt
