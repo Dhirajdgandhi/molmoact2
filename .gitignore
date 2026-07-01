@@ -1,6 +1,5 @@
 # Local datasets and training artifacts (recreated by scripts)
 data/
-outputs/
 
 # Python
 __pycache__/

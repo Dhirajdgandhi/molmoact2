@@ -1,0 +1,47 @@
+{
+  "checkpoint": "dhirajdg/molmoact2-record-test-step3000-eval03562-20260625",
+  "timestamp": "20260701T010531Z",
+  "val_episodes": 1,
+  "val_frames": 400,
+  "conditions": {
+    "baseline": {
+      "ablated_cameras": [],
+      "active_cameras": [
+        "observation.images.top",
+        "observation.images.wrist"
+      ],
+      "metrics": {
+        "eval/action_flow_loss": 0.38752764120697974,
+        "eval/loss": 0.38752764120697974,
+        "open_loop/action_mse": 0.014069166513897169,
+        "open_loop/action_rmse": 0.11861351741642757,
+        "open_loop/joint_0_mse": 0.015383887104690075,
+        "open_loop/joint_1_mse": 0.001273579546250403,
+        "open_loop/joint_2_mse": 0.014865000732243061,
+        "open_loop/joint_3_mse": 0.013668559491634369,
+        "open_loop/joint_4_mse": 0.03907589614391327,
+        "open_loop/joint_5_mse": 0.00014808654668740928
+      }
+    },
+    "no_top": {
+      "ablated_cameras": [
+        "observation.images.top"
+      ],
+      "active_cameras": [
+        "observation.images.wrist"
+      ],
+      "metrics": {
+        "eval/action_flow_loss": 0.4457826584018767,
+        "eval/loss": 0.4457826584018767,
+        "open_loop/action_mse": 0.013374741851876024,
+        "open_loop/action_rmse": 0.11564921898515365,
+        "open_loop/joint_0_mse": 0.01657664217054844,
+        "open_loop/joint_1_mse": 0.0011285673826932907,
+        "open_loop/joint_2_mse": 0.011933227069675922,
+        "open_loop/joint_3_mse": 0.011696981266140938,
+        "open_loop/joint_4_mse": 0.03877498209476471,
+        "open_loop/joint_5_mse": 0.00013805388880427927
+      }
+    }
+  }
+}

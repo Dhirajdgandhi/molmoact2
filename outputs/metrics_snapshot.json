@@ -1,0 +1,154 @@
+{
+  "collected_at": "2026-07-01T01:12:37.613808+00:00",
+  "event": "offline_eval",
+  "config": {
+    "SOURCE_DATASET_REPO": "dhirajdg/record-test_20260607_235017",
+    "TRAIN_DATASET_REPO": "dhirajdg/record-test_20260607_235017_train",
+    "VAL_DATASET_REPO": "dhirajdg/record-test_20260607_235017_val",
+    "TRAIN_FRACTION": 0.9,
+    "VAL_FRACTION": 0.1,
+    "CHECKPOINT_PATH": "allenai/MolmoAct2-SO100_101",
+    "NORM_TAG": "so100_so101_molmoact2",
+    "SETUP_TYPE": "single so100/so101 robotic arm in molmoact2",
+    "CONTROL_MODE": "absolute joint pose",
+    "IMAGE_KEYS": [
+      "observation.images.top",
+      "observation.images.wrist"
+    ],
+    "JOB_NAME": "molmoact2-record-test",
+    "SEED": 42,
+    "STEPS": 3000,
+    "BATCH_SIZE": 2,
+    "NUM_WORKERS": 2,
+    "EVAL_NUM_WORKERS": 0,
+    "LOG_FREQ": 20,
+    "EVAL_EVERY": 100,
+    "SAVE_FREQ": 500,
+    "KEEP_LAST_N_CHECKPOINTS": 1,
+    "SAVE_BEST_CHECKPOINT": true,
+    "SAVE_BEST_MODEL_ONLY": true,
+    "PUSH_TO_HUB": true,
+    "HUB_REPO_ID": "dhirajdg/molmoact2-record-test",
+    "HUB_BEST_REPO_PREFIX": "dhirajdg/molmoact2-record-test",
+    "HUB_USE_UNIQUE_BEST_REPO": true,
+    "ENABLE_LORA_VLM": false,
+    "TRAIN_ACTION_EXPERT_ONLY": true,
+    "GRADIENT_CHECKPOINTING": true,
+    "NORMALIZE_GRIPPER": true,
+    "ACTION_MODE": "continuous",
+    "CHUNK_SIZE": 30,
+    "N_ACTION_STEPS": 30,
+    "NUM_FLOW_TIMESTEPS": 8,
+    "MODEL_DTYPE": "bfloat16",
+    "OPTIMIZER_LR": 5e-05,
+    "OPTIMIZER_VIT_LR": 5e-05,
+    "OPTIMIZER_CONNECTOR_LR": 5e-05,
+    "OPTIMIZER_ACTION_EXPERT_LR": 5e-05,
+    "SCHEDULER_WARMUP_STEPS": 100,
+    "WANDB_ENABLE": true,
+    "WANDB_PROJECT": "molmoact2-record-test",
+    "WANDB_ENTITY": null,
+    "VIDEO_BACKEND": "pyav"
+  },
+  "dataset_plan": {
+    "episodes_total": 10,
+    "frames_total": 2299,
+    "train_episodes": 9,
+    "train_frames": 1899,
+    "val_episodes": 1,
+    "val_frames": 400,
+    "task": "Brush solar panel and return to base",
+    "robot": "so_follower",
+    "action_dim": 6,
+    "cameras": [
+      "observation.images.top",
+      "observation.images.wrist"
+    ]
+  },
+  "training": {
+    "train_log": null,
+    "train_log_parsed": {},
+    "best_meta": null,
+    "hub_best_push": null,
+    "checkpoints_dir": null,
+    "latest_hub_repo": "dhirajdg/molmoact2-record-test-step3000-eval03562-20260625"
+  },
+  "offline_eval": {
+    "latest": {
+      "eval/action_flow_loss": 0.3771537825744599,
+      "eval/loss": 0.3771537825744599,
+      "open_loop/action_mse": 0.013921189393828777,
+      "open_loop/action_rmse": 0.11798809005077071,
+      "open_loop/joint_0_mse": 0.016322467476129532,
+      "open_loop/joint_1_mse": 0.0012049415381625295,
+      "open_loop/joint_2_mse": 0.013491661287844181,
+      "open_loop/joint_3_mse": 0.013248736970126629,
+      "open_loop/joint_4_mse": 0.03910896182060242,
+      "open_loop/joint_5_mse": 0.0001503753592260182
+    },
+    "history": [
+      {
+        "path": "outputs/eval_runs/dhirajdg_molmoact2-record-test-step3000-eval03562-20260625_ablation_20260701T010531Z.json",
+        "mtime": "2026-07-01T01:12:30.152576+00:00",
+        "metrics": {
+          "checkpoint": "dhirajdg/molmoact2-record-test-step3000-eval03562-20260625",
+          "timestamp": "20260701T010531Z",
+          "val_episodes": 1,
+          "val_frames": 400,
+          "conditions": {
+            "baseline": {
+              "ablated_cameras": [],
+              "active_cameras": [
+                "observation.images.top",
+                "observation.images.wrist"
+              ],
+              "metrics": {
+                "eval/action_flow_loss": 0.38752764120697974,
+                "eval/loss": 0.38752764120697974,
+                "open_loop/action_mse": 0.014069166513897169,
+                "open_loop/action_rmse": 0.11861351741642757,
+                "open_loop/joint_0_mse": 0.015383887104690075,
+                "open_loop/joint_1_mse": 0.001273579546250403,
+                "open_loop/joint_2_mse": 0.014865000732243061,
+                "open_loop/joint_3_mse": 0.013668559491634369,
+                "open_loop/joint_4_mse": 0.03907589614391327,
+                "open_loop/joint_5_mse": 0.00014808654668740928
+              }
+            },
+            "no_top": {
+              "ablated_cameras": [
+                "observation.images.top"
+              ],
+              "active_cameras": [
+                "observation.images.wrist"
+              ],
+              "metrics": {
+                "eval/action_flow_loss": 0.4457826584018767,
+                "eval/loss": 0.4457826584018767,
+                "open_loop/action_mse": 0.013374741851876024,
+                "open_loop/action_rmse": 0.11564921898515365,
+                "open_loop/joint_0_mse": 0.01657664217054844,
+                "open_loop/joint_1_mse": 0.0011285673826932907,
+                "open_loop/joint_2_mse": 0.011933227069675922,
+                "open_loop/joint_3_mse": 0.011696981266140938,
+                "open_loop/joint_4_mse": 0.03877498209476471,
+                "open_loop/joint_5_mse": 0.00013805388880427927
+              }
+            }
+          }
+        },
+        "meta": {}
+      }
+    ]
+  },
+  "prior_analyses": [
+    {
+      "path": "outputs/analyses/README.md",
+      "mtime": "2026-07-01T00:44:27.105307+00:00"
+    },
+    {
+      "path": "outputs/analyses/20260701-004500-offline_eval-step3000-eval03562.md",
+      "mtime": "2026-07-01T00:44:35.665802+00:00"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "eval/action_flow_loss": 0.3771537825744599,
+  "eval/loss": 0.3771537825744599,
+  "open_loop/action_mse": 0.013921189393828777,
+  "open_loop/action_rmse": 0.11798809005077071,
+  "open_loop/joint_0_mse": 0.016322467476129532,
+  "open_loop/joint_1_mse": 0.0012049415381625295,
+  "open_loop/joint_2_mse": 0.013491661287844181,
+  "open_loop/joint_3_mse": 0.013248736970126629,
+  "open_loop/joint_4_mse": 0.03910896182060242,
+  "open_loop/joint_5_mse": 0.0001503753592260182
+}

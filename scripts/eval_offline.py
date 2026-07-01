@@ -32,6 +32,12 @@ from train import _make_dataloader, _release_cuda_cache, evaluate
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+# Short names accepted by --ablate-camera (maps to LeRobot observation keys).
+CAMERA_ALIASES: dict[str, str] = {
+    "top": "observation.images.top",
+    "wrist": "observation.images.wrist",
+}
+
 
 def _candidate_checkpoints_dirs() -> list[Path]:
     from lerobot.utils.constants import CHECKPOINTS_DIR
@@ -87,6 +93,48 @@ def _to_device(batch: dict, device: torch.device) -> dict:
         key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
         for key, value in batch.items()
     }
+
+
+def resolve_ablated_cameras(names: list[str]) -> set[str]:
+    """Resolve CLI camera names to full observation image keys."""
+    resolved: set[str] = set()
+    valid = set(CAMERA_ALIASES) | set(CAMERA_ALIASES.values()) | set(config.IMAGE_KEYS)
+    for name in names:
+        key = CAMERA_ALIASES.get(name, name)
+        if key not in valid:
+            raise ValueError(
+                f"Unknown camera {name!r}. Choose from: {', '.join(sorted(CAMERA_ALIASES))} "
+                f"or full keys {config.IMAGE_KEYS}."
+            )
+        resolved.add(key)
+    return resolved
+
+
+def _apply_camera_ablation(batch: dict, ablated_keys: set[str]) -> dict:
+    """Zero out ablated camera frames so the model still receives all expected keys."""
+    if not ablated_keys:
+        return batch
+    batch = dict(batch)
+    for key in ablated_keys:
+        if key in batch and isinstance(batch[key], torch.Tensor):
+            batch[key] = torch.zeros_like(batch[key])
+    return batch
+
+
+class _AblatedLoader:
+    """DataLoader wrapper that zeros selected camera streams before each batch."""
+
+    def __init__(self, loader: DataLoader, ablated_keys: set[str]) -> None:
+        self.loader = loader
+        self.ablated_keys = ablated_keys
+
+    @property
+    def dataset(self):
+        return self.loader.dataset
+
+    def __iter__(self):
+        for batch in self.loader:
+            yield _apply_camera_ablation(batch, self.ablated_keys)
 
 
 def _prepare_batch(batch: dict, dataset, preprocessor, device: torch.device) -> dict:
@@ -176,6 +224,99 @@ def load_policy_and_data(checkpoint: str | Path):
     return policy, preprocessor, postprocessor, val_dataset
 
 
+def _metric_keys(results: dict[str, float]) -> list[str]:
+    return sorted(key for key in results if not key.startswith("_"))
+
+
+def _format_ablation_table(
+    rows: list[tuple[str, dict[str, float]]],
+    metric_keys: list[str] | None = None,
+    condition_notes: dict[str, str] | None = None,
+) -> str:
+    """Render a markdown table comparing metrics across ablation conditions."""
+    if not rows:
+        return ""
+    keys = metric_keys or _metric_keys(rows[0][1])
+    header = "| Metric | " + " | ".join(name for name, _ in rows) + " | Δ (vs baseline) |"
+    sep = "|" + "|".join(["---"] * (len(rows) + 2)) + "|"
+    lines = ["## Camera ablation study", "", header, sep]
+    for key in keys:
+        values = [metrics.get(key) for _, metrics in rows]
+        cells = [f"{value:.6f}" if value is not None else "—" for value in values]
+        delta = "—"
+        if len(values) >= 2 and values[0] is not None and values[1] is not None:
+            delta = f"{values[1] - values[0]:+.6f}"
+        lines.append(f"| `{key}` | " + " | ".join(cells) + f" | {delta} |")
+    lines.append("")
+    if condition_notes:
+        lines.append("### Conditions")
+        for label, note in condition_notes.items():
+            lines.append(f"- **{label}**: {note}")
+    return "\n".join(lines)
+
+
+def _run_eval_pass(
+    *,
+    policy,
+    val_dataset,
+    batch_size: int,
+    max_batches: int,
+    preprocessor,
+    accelerator: Accelerator,
+    device: torch.device,
+    skip_open_loop: bool,
+    ablated_keys: set[str],
+    condition_label: str,
+) -> dict[str, float]:
+    val_loader = _make_dataloader(
+        val_dataset,
+        batch_size,
+        shuffle=False,
+        num_workers=config.EVAL_NUM_WORKERS,
+    )
+    if max_batches > 0:
+        val_loader = _LimitedLoader(val_loader, max_batches)
+    if ablated_keys:
+        val_loader = _AblatedLoader(val_loader, ablated_keys)
+        logger.info(
+            "Condition %r: zeroed camera(s) %s",
+            condition_label,
+            ", ".join(sorted(ablated_keys)),
+        )
+    else:
+        logger.info("Condition %r: all cameras active (%s)", condition_label, ", ".join(config.IMAGE_KEYS))
+
+    loss_metrics = evaluate(policy, val_loader, preprocessor, accelerator)
+    _release_cuda_cache()
+    logger.info("[%s] Teacher-forcing metrics:", condition_label)
+    for key, value in sorted(loss_metrics.items()):
+        logger.info("  %s = %.6f", key, value)
+
+    results = dict(loss_metrics)
+    if not skip_open_loop:
+        open_loop_loader = _make_dataloader(
+            val_dataset,
+            batch_size,
+            shuffle=False,
+            num_workers=config.EVAL_NUM_WORKERS,
+        )
+        if max_batches > 0:
+            open_loop_loader = _LimitedLoader(open_loop_loader, max_batches)
+        if ablated_keys:
+            open_loop_loader = _AblatedLoader(open_loop_loader, ablated_keys)
+        action_metrics = evaluate_open_loop_actions(
+            policy,
+            open_loop_loader,
+            preprocessor,
+            device,
+        )
+        logger.info("[%s] Open-loop action metrics:", condition_label)
+        for key, value in sorted(action_metrics.items()):
+            logger.info("  %s = %.6f", key, value)
+        results.update(action_metrics)
+    return results
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Offline val evaluation (no robot).")
     parser.add_argument(
@@ -197,6 +338,24 @@ def main() -> int:
         default=0,
         help="Limit batches for a quick smoke test (0 = full val set).",
     )
+    parser.add_argument(
+        "--ablate-camera",
+        action="append",
+        default=[],
+        metavar="CAM",
+        help=(
+            "Zero out a camera stream at eval time (repeatable). "
+            "Use short names: top, wrist. Example: --ablate-camera top"
+        ),
+    )
+    parser.add_argument(
+        "--ablation-study",
+        action="store_true",
+        help=(
+            "Run baseline (both cameras) and top-camera ablation, "
+            "then write a comparison table to outputs/camera_ablation.md."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -208,15 +367,6 @@ def main() -> int:
     logger.info("Checkpoint: %s", checkpoint)
     policy, preprocessor, _postprocessor, val_dataset = load_policy_and_data(checkpoint)
 
-    val_loader = _make_dataloader(
-        val_dataset,
-        args.batch_size,
-        shuffle=False,
-        num_workers=config.EVAL_NUM_WORKERS,
-    )
-    if args.max_batches > 0:
-        val_loader = _LimitedLoader(val_loader, args.max_batches)
-
     accelerator = Accelerator(mixed_precision="bf16")
     device = accelerator.device
     policy.to(device)
@@ -227,36 +377,93 @@ def main() -> int:
         val_dataset.num_frames,
     )
 
-    loss_metrics = evaluate(policy, val_loader, preprocessor, accelerator)
-    _release_cuda_cache()
-    logger.info("Teacher-forcing metrics:")
-    for key, value in sorted(loss_metrics.items()):
-        logger.info("  %s = %.6f", key, value)
-
-    results = dict(loss_metrics)
-    if not args.skip_open_loop:
-        action_metrics = evaluate_open_loop_actions(
-            policy,
-            val_loader,
-            preprocessor,
-            device,
-        )
-        logger.info("Open-loop action metrics:")
-        for key, value in sorted(action_metrics.items()):
-            logger.info("  %s = %.6f", key, value)
-        results.update(action_metrics)
-
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    outputs_dir = config.PROJECT_ROOT / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^a-zA-Z0-9._-]", "_", str(checkpoint).replace("/", "_"))
+
+    if args.ablation_study:
+        conditions: list[tuple[str, set[str]]] = [
+            ("baseline", set()),
+            ("no_top", {CAMERA_ALIASES["top"]}),
+        ]
+        study_rows: list[tuple[str, dict[str, float]]] = []
+        study_payload: dict[str, object] = {
+            "checkpoint": str(checkpoint),
+            "timestamp": timestamp,
+            "val_episodes": val_dataset.num_episodes,
+            "val_frames": val_dataset.num_frames,
+            "conditions": {},
+        }
+        for label, ablated_keys in conditions:
+            metrics = _run_eval_pass(
+                policy=policy,
+                val_dataset=val_dataset,
+                batch_size=args.batch_size,
+                max_batches=args.max_batches,
+                preprocessor=preprocessor,
+                accelerator=accelerator,
+                device=device,
+                skip_open_loop=args.skip_open_loop,
+                ablated_keys=ablated_keys,
+                condition_label=label,
+            )
+            study_rows.append((label, metrics))
+            study_payload["conditions"][label] = {
+                "ablated_cameras": sorted(ablated_keys),
+                "active_cameras": [k for k in config.IMAGE_KEYS if k not in ablated_keys],
+                "metrics": metrics,
+            }
+
+        metric_keys = _metric_keys(study_rows[0][1])
+        condition_notes = {
+            "baseline": f"both cameras active ({', '.join(config.IMAGE_KEYS)})",
+            "no_top": f"top camera zeroed (`{CAMERA_ALIASES['top']}`); wrist active",
+        }
+        table_md = _format_ablation_table(study_rows, metric_keys, condition_notes)
+        print("\n" + table_md)
+
+        ablation_md_path = outputs_dir / "camera_ablation.md"
+        ablation_md_path.write_text(
+            f"# Camera ablation — {timestamp}\n\n"
+            f"**Checkpoint:** `{checkpoint}`\n\n"
+            f"{table_md}\n"
+        )
+        ablation_json_path = outputs_dir / "camera_ablation.json"
+        ablation_json_path.write_text(json.dumps(study_payload, indent=2) + "\n")
+
+        archive_path = outputs_dir / "eval_runs" / f"{slug}_ablation_{timestamp}.json"
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_text(json.dumps(study_payload, indent=2) + "\n")
+
+        logger.info("Wrote %s", ablation_md_path)
+        logger.info("Wrote %s", ablation_json_path)
+        logger.info("Archived %s", archive_path)
+        return 0
+
+    ablated_keys = resolve_ablated_cameras(args.ablate_camera)
+    results = _run_eval_pass(
+        policy=policy,
+        val_dataset=val_dataset,
+        batch_size=args.batch_size,
+        max_batches=args.max_batches,
+        preprocessor=preprocessor,
+        accelerator=accelerator,
+        device=device,
+        skip_open_loop=args.skip_open_loop,
+        ablated_keys=ablated_keys,
+        condition_label="ablated" if ablated_keys else "baseline",
+    )
+
     results["_meta"] = {
         "checkpoint": str(checkpoint),
         "timestamp": timestamp,
         "val_episodes": val_dataset.num_episodes,
         "val_frames": val_dataset.num_frames,
+        "ablated_cameras": sorted(ablated_keys),
+        "active_cameras": [k for k in config.IMAGE_KEYS if k not in ablated_keys],
     }
 
-    outputs_dir = config.PROJECT_ROOT / "outputs"
-    outputs_dir.mkdir(parents=True, exist_ok=True)
-    slug = re.sub(r"[^a-zA-Z0-9._-]", "_", str(checkpoint).replace("/", "_"))
     archive_path = outputs_dir / "eval_runs" / f"{slug}_{timestamp}.json"
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_text(json.dumps(results, indent=2) + "\n")
