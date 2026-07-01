@@ -129,3 +129,15 @@ Dockerfile             # Reproducible GPU eval image
 ```
 
 See `specs/PLAN.md` for what to watch in training/eval loss curves.
+
+## Run analysis (research advisor report)
+
+After training or `./scripts/run_eval.sh`, invoke the **`training-eval-analysis`** skill (`.cursor/skills/training-eval-analysis/`) to generate a saved 2–3 page report under `outputs/analyses/`.
+
+Metrics are collected automatically:
+
+```bash
+python scripts/collect_metrics_snapshot.py --event offline_eval --out outputs/metrics_snapshot.json
+```
+
+`run_eval.sh` updates `outputs/metrics_snapshot.json` on success.

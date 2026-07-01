@@ -37,4 +37,10 @@ if [[ $# -eq 0 && -z "${MOLMOACT2_CHECKPOINT:-}" ]]; then
 fi
 
 cd "$SCRIPT_DIR"
-exec python eval_offline.py "$@"
+if python eval_offline.py "$@"; then
+  python collect_metrics_snapshot.py --event offline_eval --out "$PROJECT_ROOT/outputs/metrics_snapshot.json" >/dev/null 2>&1 || true
+  echo "Metrics snapshot: $PROJECT_ROOT/outputs/metrics_snapshot.json"
+  echo "Run training-eval-analysis skill for a saved advisor report."
+  exit 0
+fi
+exit 1
